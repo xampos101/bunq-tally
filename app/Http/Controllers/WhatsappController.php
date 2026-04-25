@@ -12,9 +12,12 @@ class WhatsappController extends Controller
     public function sendText(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'phone' => 'required|string',
-            'text' => 'required|string',
+            'phone_number' => 'required|string',
+            'message' => 'required|string',
         ]);
+
+        $data['phone'] = $data['phone_number'];
+        $data['text'] = $data['message'];
 
         $base = rtrim((string) config('services.openwa.url'), '/');
         $apiKey = config('services.openwa.api_key');

@@ -11,12 +11,11 @@ class ContactController extends Controller
 {
     public function index(): JsonResponse
     {
-        return response()->json(Contact::orderBy('name')->get());
-        $contacts = Contact::query()
-            ->orderBy('name')
+        $contacts = Contact::orderBy('name')
             ->get()
             ->map(fn (Contact $c) => $this->transform($c));
 
+        return response()->json(['data' => $contacts]);
     }
 
     public function store(Request $request): JsonResponse
