@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Contact;
 use App\Models\PaymentRequest;
 use App\Services\BunqService;
 use Illuminate\Http\JsonResponse;
@@ -22,18 +21,15 @@ class BunqController extends Controller
     public function createPaymentRequest(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'contact_id'  => ['required', 'exists:contacts,id'],
             'amount'      => ['required', 'numeric', 'min:0.01'],
             'description' => ['sometimes', 'string', 'max:140'],
         ]);
 
-        $contact = Contact::findOrFail($data['contact_id']);
-        $description = $data['description'] ?? "Payment request for {$contact->name}";
+        $description = $data['description'] ?? "Payment request";
 
         $link = $this->bunq->createPaymentLink((float) $data['amount'], $description);
 
         $paymentRequest = PaymentRequest::create([
-            'contact_id'  => $contact->id,
             'amount'      => $data['amount'],
             'paid'        => false,
             'bunq_tab_id' => $link['tab_id'],

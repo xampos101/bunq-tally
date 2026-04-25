@@ -3,8 +3,8 @@
 namespace App\Services;
 
 use bunq\Context\ApiContext;
-use bunq\Context\ApiEnvironmentType;
 use bunq\Context\BunqContext;
+use bunq\Util\BunqEnumApiEnvironmentType;
 use bunq\Model\Generated\Endpoint\BunqMeTab;
 use bunq\Model\Generated\Object\Amount;
 use bunq\Model\Generated\Object\BunqMeTabEntry;
@@ -24,8 +24,8 @@ class BunqService
         if (!file_exists($this->contextPath)) {
             $context = ApiContext::create(
                 config('bunq.env') === 'production'
-                    ? ApiEnvironmentType::PRODUCTION()
-                    : ApiEnvironmentType::SANDBOX(),
+                    ? BunqEnumApiEnvironmentType::PRODUCTION()
+                    : BunqEnumApiEnvironmentType::SANDBOX(),
                 config('bunq.api_key'),
                 'bunq-tally'
             );
