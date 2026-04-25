@@ -8,11 +8,19 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class ReceiptItem extends Model
 {
-    protected $fillable = ['receipt_id', 'item_name', 'price', 'quantity'];
+    protected $fillable = [
+        'receipt_id',
+        'item_name',
+        'price',
+        'quantity',
+        'category',
+        'category_confidence',
+    ];
 
     protected $casts = [
         'price' => 'decimal:2',
         'quantity' => 'integer',
+        'category_confidence' => 'decimal:2',
     ];
 
     public function receipt(): BelongsTo

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Receipt;
 use App\Models\User;
+use App\Support\SpendingCategories;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
@@ -41,17 +42,28 @@ class ClaudeController extends Controller
         $mediaType = $prepared['media_type'];
         $base64 = $prepared['base64'];
 
-        $prompt = <<<'PROMPT'
+        $categoriesList = implode(', ', SpendingCategories::CATEGORIES);
+        $prompt = <<<PROMPT
 You are a receipt parser. Read the receipt image and reply with ONLY a JSON object,
 no prose, no markdown fences. Use this exact schema:
 {
   "merchant": string,
   "date": "YYYY-MM-DD" or null,
   "currency": ISO 4217 code or symbol if unknown,
-  "items": [{ "name": string, "price": number }],
+  "items": [{ "name": string, "price": number, "category": string, "confidence": number }],
   "total": number
 }
 Numbers must be plain decimals (e.g. 12.50). Omit currency symbols inside numbers.
+
+For "category" pick exactly one value from this fixed list:
+{$categoriesList}
+Use "other" if nothing fits. "confidence" is your confidence between 0 and 1
+(e.g. 0.92). Choose categories like a budgeting app would: e.g. fresh produce
+and supermarket items are "groceries"; restaurant or takeaway meals are
+"food_out"; beer/wine/spirits are "alcohol"; espresso/cappuccino/latte are
+"coffee"; transit/fuel/uber are "transport"; cinema/streaming/games are
+"entertainment"; bills are "utilities"; clothes/electronics are "shopping";
+pharmacy/doctor are "health"; cleaning/home goods are "household".
 PROMPT;
 
         $response = Http::withHeaders([
@@ -123,10 +135,17 @@ PROMPT;
                     continue;
                 }
 
+                $confidence = isset($item['confidence']) ? (float) $item['confidence'] : null;
+                if ($confidence !== null) {
+                    $confidence = max(0.0, min(1.0, $confidence));
+                }
+
                 $receipt->items()->create([
                     'item_name' => $item['name'],
                     'price' => $item['price'],
                     'quantity' => 1,
+                    'category' => SpendingCategories::normalize($item['category'] ?? null),
+                    'category_confidence' => $confidence,
                 ]);
             }
 
