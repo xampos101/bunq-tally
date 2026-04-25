@@ -3,9 +3,6 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\BunqController;
 
-Route::get('/', function () {
-    return view('welcome');
-});
 
 
 
@@ -16,3 +13,5 @@ Route::get('/bunq', function () {
         'description' => 'Test payment',
     ]));
 });
+Route::view('/', 'app');
+Route::view('/{any}', 'app')->where('any', '^(?!api|storage|build|fonts).*$');
