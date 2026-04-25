@@ -3,8 +3,13 @@ import {
   Camera, Clock, Check, ChevronRight, Users,
   ReceiptText, Info, X, Sun, Moon, Loader2,
   Plus, Pencil, Trash2,
+  BarChart3, TrendingUp, TrendingDown, Target, AlertTriangle, Sparkles,
 } from "lucide-react";
-import { api, ApiError, type ApiContact, type ApiReceipt } from "./api";
+import {
+  api, ApiError,
+  type ApiContact, type ApiReceipt, type ApiSplit,
+  type ApiInsightsDashboard, type ApiBudgetStatus, type ApiBreakdownRow, type ApiCategoryMeta,
+} from "./api";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -861,6 +866,8 @@ type TallyPhase = "start" | "camera" | "scanning" | "split" | "sending" | "done"
 
 type FailedSend = { name: string; phone: string; message: string };
 
+type LiveSplit = ApiSplit & { contact: ApiContact | null; paid_at?: string | null };
+
 interface TallyScreenProps {
   onReceiptOpenChange: (open: boolean) => void;
 }
@@ -885,6 +892,14 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
   const [splitWarnings, setSplitWarnings] = useState<string[]>([]);
   const [failedSends, setFailedSends] = useState<FailedSend[]>([]);
   const [retrying, setRetrying] = useState(false);
+  const [liveSplits, setLiveSplits] = useState<LiveSplit[]>([]);
+  const [pollingActive, setPollingActive] = useState(false);
+  const [budgetToast, setBudgetToast] = useState<{
+    label: string;
+    color: string;
+    pct: number;
+    status: "warning" | "over";
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const currentItems: ReceiptItem[] = scanned?.items ?? receiptItems;
@@ -937,6 +952,25 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
       });
       setAllocations({});
       setPhase("split");
+
+      // Surface the most-impacted budget that just crossed warning/over.
+      // Soft-fail: a missing endpoint or empty response just skips the toast.
+      try {
+        const { data: budgets } = await api.getBudgetStatus();
+        const tripped = budgets
+          .filter(b => b.status === "over" || b.status === "warning")
+          .sort((a, b) => b.pct_used - a.pct_used)[0];
+        if (tripped) {
+          setBudgetToast({
+            label: tripped.label,
+            color: tripped.color,
+            pct: tripped.pct_used,
+            status: tripped.status as "warning" | "over",
+          });
+        }
+      } catch {
+        // ignore
+      }
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "Could not scan receipt";
       setErrorMessage(message);
@@ -1015,6 +1049,8 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
 
       setSplitWarnings(warnings);
       setFailedSends(newFailedSends);
+      setLiveSplits(splitResult.splits as LiveSplit[]);
+      setPollingActive(splitResult.bunq_available && splitResult.splits.some(s => !s.paid));
       if (notes.length > 0) {
         setErrorMessage(notes.join("; "));
       }
@@ -1047,6 +1083,51 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
     setRetrying(false);
   };
 
+  // Poll receipt status while in done phase + at least one split is unpaid.
+  // Stops automatically when all are paid, after 5 minutes, or when phase changes.
+  useEffect(() => {
+    if (phase !== "done" || !scanned || !pollingActive) return;
+
+    let cancelled = false;
+    const startedAt = Date.now();
+    const MAX_DURATION_MS = 5 * 60 * 1000;
+    const receiptId = scanned.id;
+
+    const poll = async () => {
+      try {
+        const res = await api.getReceiptStatus(receiptId);
+        if (cancelled) return;
+        setLiveSplits(prev => {
+          const byId = new Map(res.splits.map(s => [s.id, s]));
+          return prev.map(p => {
+            const fresh = byId.get(p.id);
+            return fresh ? { ...p, ...fresh } : p;
+          });
+        });
+        if (res.splits.length > 0 && res.splits.every(s => s.paid)) {
+          setPollingActive(false);
+        }
+      } catch {
+        // Soft-fail: keep polling, network blips are expected.
+      }
+    };
+
+    const interval = window.setInterval(() => {
+      if (Date.now() - startedAt > MAX_DURATION_MS) {
+        setPollingActive(false);
+        return;
+      }
+      void poll();
+    }, 4000);
+
+    void poll();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [phase, scanned, pollingActive]);
+
   const reset = () => {
     setSelected(null);
     setAllocations({});
@@ -1055,6 +1136,9 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
     setSplitWarnings([]);
     setFailedSends([]);
     setRetrying(false);
+    setLiveSplits([]);
+    setPollingActive(false);
+    setBudgetToast(null);
     setPhase("start");
     onReceiptOpenChange(false);
   };
@@ -1086,6 +1170,38 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
     />
   );
 
+  const budgetToastUi = budgetToast && (
+    <div
+      className="fixed left-1/2 -translate-x-1/2 z-40"
+      style={{ top: 18, width: "calc(100% - 24px)", maxWidth: 360 }}
+    >
+      <div
+        className="rounded-2xl px-3.5 py-2.5 flex items-center gap-2.5 shadow-lg"
+        style={{
+          background: theme.card,
+          border: `1px solid ${budgetToast.status === "over" ? BRAND.red : BRAND.orange}66`,
+        }}
+      >
+        <AlertTriangle
+          size={16}
+          strokeWidth={3}
+          style={{ color: budgetToast.status === "over" ? BRAND.red : BRAND.orange, flexShrink: 0 }}
+        />
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-black truncate" style={{ color: theme.text }}>
+            {budgetToast.label} budget {budgetToast.status === "over" ? "exceeded" : "warning"}
+          </p>
+          <p className="text-[10px] font-semibold mt-0.5" style={{ color: theme.dim }}>
+            {Math.round(budgetToast.pct)}% used this month
+          </p>
+        </div>
+        <button onClick={() => setBudgetToast(null)} aria-label="Dismiss" className="p-0.5">
+          <X size={14} style={{ color: theme.dim }} strokeWidth={2.5} />
+        </button>
+      </div>
+    </div>
+  );
+
   // ─── Phase gating ──────────────────────────────────────────────────────────
 
   if (phase === "start") {
@@ -1093,6 +1209,7 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
       <div className="flex flex-col gap-4 pb-4">
         <ScanCTA onTap={startScan} />
         {hiddenInput}
+        {budgetToastUi}
         {errorMessage && (
           <p className="mx-4 text-xs text-center font-semibold" style={{ color: BRAND.red }}>
             {errorMessage}
@@ -1107,6 +1224,7 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
       <div className="flex flex-col gap-4 pb-4">
         <CameraFraming onCapture={captureReceipt} onCancel={reset} />
         {hiddenInput}
+        {budgetToastUi}
       </div>
     );
   }
@@ -1116,11 +1234,76 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
       <div className="flex flex-col gap-4 pb-4">
         <ScanningLoader />
         {hiddenInput}
+        {budgetToastUi}
       </div>
     );
   }
 
   if (phase === "done") {
+    const paidCount = liveSplits.filter(s => s.paid).length;
+    const totalCount = liveSplits.length;
+    const allPaid = totalCount > 0 && paidCount === totalCount;
+    const headerBg = splitWarnings.length > 0 ? BRAND.orange : (allPaid ? theme.brand : theme.brand);
+    const headerTitle = splitWarnings.length > 0
+      ? "Split done — some issues"
+      : allPaid
+        ? "All paid!"
+        : "WhatsApp reminders sent!";
+    const headerSubtitle = splitWarnings.length > 0
+      ? `${friendTotals.length - splitWarnings.length} of ${friendTotals.length} notified`
+      : totalCount > 0
+        ? `${paidCount} of ${totalCount} paid`
+        : `${friendTotals.length} friend${friendTotals.length === 1 ? "" : "s"} notified`;
+
+    const renderRow = (f: typeof friendTotals[number]) => {
+      const live = liveSplits.find(s => s.contact_id === f.id);
+      const paid = !!live?.paid;
+      const paymentUrl = live?.payment_url ?? null;
+      return (
+        <div
+          key={f.id}
+          className="flex items-center gap-3 rounded-2xl px-3 py-2 transition-all duration-500"
+          style={{
+            background: paid ? `${theme.brand}1A` : theme.cardHi,
+            border: paid ? `1px solid ${theme.brand}55` : `1px solid transparent`,
+          }}
+        >
+          <FriendAvatar f={f} size={32} fontSize={11} />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold truncate" style={{ color: theme.text }}>{f.name}</p>
+            <span
+              className="inline-flex items-center gap-1 mt-0.5 px-2 py-0.5 rounded-full text-[10px] font-black tracking-wide transition-all duration-500"
+              style={{
+                background: paid ? theme.brand : `${theme.dim}22`,
+                color: paid ? "#000" : theme.dim,
+              }}
+            >
+              {paid ? <><Check size={10} strokeWidth={3} /> PAID</> : "PENDING"}
+            </span>
+          </div>
+          <div className="flex flex-col items-end gap-1">
+            <p
+              className="text-sm font-black transition-colors duration-500"
+              style={{ color: paid ? theme.brand : theme.text, fontFamily: FONT_MONO }}
+            >
+              €{f.total.toFixed(2)}
+            </p>
+            {!paid && paymentUrl && (
+              <a
+                href={paymentUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[10px] font-bold underline"
+                style={{ color: theme.dim }}
+              >
+                Open link
+              </a>
+            )}
+          </div>
+        </div>
+      );
+    };
+
     return (
       <div className="mx-4 mt-2 flex flex-col gap-3">
         <div
@@ -1129,34 +1312,33 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
         >
           <div className="flex items-center gap-3">
             <div
-              className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0"
-              style={{ background: splitWarnings.length === 0 ? theme.brand : BRAND.orange }}
+              className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 transition-colors duration-500"
+              style={{ background: headerBg }}
             >
               <Check size={20} className="text-white" strokeWidth={3} />
             </div>
-            <div>
+            <div className="flex-1 min-w-0">
               <p className="font-bold" style={{ color: theme.text }}>
-                {splitWarnings.length === 0 ? "WhatsApp reminders sent!" : "Split done — some issues"}
+                {headerTitle}
               </p>
               <p className="text-xs mt-0.5" style={{ color: theme.dim }}>
-                {splitWarnings.length === 0
-                  ? `${friendTotals.length} friend${friendTotals.length === 1 ? "" : "s"} notified`
-                  : `${friendTotals.length - splitWarnings.length} of ${friendTotals.length} notified`}
+                {headerSubtitle}
               </p>
             </div>
+            {pollingActive && (
+              <div
+                className="flex items-center gap-1.5 px-2 py-1 rounded-full"
+                style={{ background: `${theme.brand}22`, border: `1px solid ${theme.brand}44` }}
+              >
+                <Loader2 size={11} className="animate-spin" style={{ color: theme.brand }} strokeWidth={3} />
+                <span className="text-[9px] font-black tracking-wide" style={{ color: theme.brand }}>
+                  LIVE BUNQ STATUS
+                </span>
+              </div>
+            )}
           </div>
           <div className="flex flex-col gap-2">
-            {friendTotals.map(f => (
-              <div
-                key={f.id}
-                className="flex items-center gap-3 rounded-2xl px-3 py-2"
-                style={{ background: theme.cardHi }}
-              >
-                <FriendAvatar f={f} size={32} fontSize={11} />
-                <p className="text-sm font-semibold flex-1" style={{ color: theme.text }}>{f.name}</p>
-                <p className="text-sm font-black" style={{ color: theme.text }}>€{f.total.toFixed(2)}</p>
-              </div>
-            ))}
+            {friendTotals.map(renderRow)}
           </div>
         </div>
         {splitWarnings.length > 0 && (
@@ -1198,6 +1380,7 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
           </p>
         )}
         {hiddenInput}
+        {budgetToastUi}
       </div>
     );
   }
@@ -1393,6 +1576,7 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
         })()}
 
         {hiddenInput}
+        {budgetToastUi}
     </div>
   );
 }
@@ -1722,6 +1906,470 @@ function ReceiptsScreen() {
   );
 }
 
+// ── Insights / AI Spending Coach ──────────────────────────────────────────────
+
+function InsightsScreen() {
+  const theme = useTheme();
+  const [data, setData] = useState<ApiInsightsDashboard | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [editingBudget, setEditingBudget] = useState<{
+    category: string;
+    label: string;
+    color: string;
+    monthly_limit: number;
+  } | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const dash = await api.getInsightsDashboard();
+      setData(dash);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to load insights");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  if (loading && !data) {
+    return (
+      <div className="flex flex-col gap-4 pb-4 animate-pulse">
+        <div className="mx-4 rounded-3xl p-5" style={{ background: theme.card, border: `1px solid ${theme.border}` }}>
+          <div className="h-2.5 w-24 rounded-full mb-4" style={{ background: `${theme.dim}33` }} />
+          <div className="h-10 w-40 rounded-xl" style={{ background: `${theme.dim}26` }} />
+          <div className="h-2.5 w-36 rounded-full mt-3" style={{ background: `${theme.dim}22` }} />
+        </div>
+        <div className="mx-4 rounded-3xl p-5" style={{ background: theme.card, border: `1px solid ${theme.border}` }}>
+          <div className="h-2.5 w-28 rounded-full mb-4" style={{ background: `${theme.dim}33` }} />
+          <div className="flex items-center gap-5">
+            <div className="w-[110px] h-[110px] rounded-full" style={{ background: `${theme.dim}22` }} />
+            <div className="flex-1 flex flex-col gap-2">
+              <div className="h-2.5 w-full rounded-full" style={{ background: `${theme.dim}24` }} />
+              <div className="h-2.5 w-5/6 rounded-full" style={{ background: `${theme.dim}20` }} />
+              <div className="h-2.5 w-2/3 rounded-full" style={{ background: `${theme.dim}18` }} />
+            </div>
+          </div>
+        </div>
+        <div className="mx-4 rounded-2xl px-4 py-3" style={{ background: `${theme.brand}10`, border: `1px solid ${theme.brand}22` }}>
+          <div className="h-2.5 w-3/4 rounded-full" style={{ background: `${theme.dim}20` }} />
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="mx-4 mt-3 rounded-2xl px-4 py-3" style={{ background: `${BRAND.red}14`, border: `1px solid ${BRAND.red}33` }}>
+        <p className="text-xs font-bold" style={{ color: BRAND.red }}>{error}</p>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const allCategoriesByKey: Record<string, ApiCategoryMeta> = {};
+  data.categories.forEach(c => { allCategoriesByKey[c.key] = c; });
+
+  const unBudgetedCategories = data.categories.filter(
+    c => !data.budgets.some(b => b.category === c.key)
+  );
+
+  return (
+    <>
+      <div className="flex flex-col gap-4 pb-4">
+        <MonthlyTotalCard data={data} theme={theme} />
+        <CategoryDonut breakdown={data.breakdown} theme={theme} />
+        {data.narratives.length > 0 && (
+          <InsightCards narratives={data.narratives} theme={theme} />
+        )}
+        <BudgetList
+          budgets={data.budgets}
+          theme={theme}
+          onEdit={(b) => setEditingBudget({
+            category: b.category,
+            label: b.label,
+            color: b.color,
+            monthly_limit: b.limit,
+          })}
+        />
+        {unBudgetedCategories.length > 0 && (
+          <div className="mx-4">
+            <p className="text-[10px] font-black uppercase tracking-widest mb-2" style={{ color: theme.dim }}>
+              Add a budget
+            </p>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {unBudgetedCategories.map(c => (
+                <button
+                  key={c.key}
+                  onClick={() => setEditingBudget({ category: c.key, label: c.label, color: c.color, monthly_limit: 100 })}
+                  className="flex-shrink-0 rounded-full px-3 py-1.5 text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95"
+                  style={{ background: `${c.color}22`, color: c.color, border: `1px solid ${c.color}55` }}
+                >
+                  <Plus size={12} strokeWidth={3} />
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {editingBudget && (
+        <BudgetEditorSheet
+          category={editingBudget.category}
+          label={editingBudget.label}
+          color={editingBudget.color}
+          initialLimit={editingBudget.monthly_limit}
+          onClose={() => setEditingBudget(null)}
+          onSaved={() => {
+            setEditingBudget(null);
+            void refresh();
+          }}
+          existingId={data.budgets.find(b => b.category === editingBudget.category)?.id}
+        />
+      )}
+    </>
+  );
+}
+
+function MonthlyTotalCard({ data, theme }: { data: ApiInsightsDashboard; theme: typeof DARK }) {
+  const delta = data.month_delta_pct;
+  const deltaColor = delta == null
+    ? theme.dim
+    : delta > 0
+      ? BRAND.red
+      : BRAND.green;
+  const DeltaIcon = delta == null
+    ? null
+    : delta > 0
+      ? TrendingUp
+      : TrendingDown;
+
+  return (
+    <div
+      className="mx-4 rounded-3xl p-5"
+      style={{ background: theme.card, border: `1px solid ${theme.border}` }}
+    >
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: theme.dim }}>
+          This month
+        </p>
+        <BarChart3 size={14} style={{ color: theme.dim }} strokeWidth={2.5} />
+      </div>
+      <p
+        className="font-light mt-2"
+        style={{
+          color: theme.text,
+          fontSize: 40,
+          letterSpacing: "-0.02em",
+          fontFamily: FONT_MONO,
+        }}
+      >
+        €{data.month_total.toFixed(2)}
+      </p>
+      {delta != null && DeltaIcon && (
+        <div className="flex items-center gap-1.5 mt-1">
+          <DeltaIcon size={12} style={{ color: deltaColor }} strokeWidth={3} />
+          <span className="text-xs font-black" style={{ color: deltaColor }}>
+            {delta > 0 ? "+" : ""}{delta}%
+          </span>
+          <span className="text-xs font-medium" style={{ color: theme.dim }}>
+            vs last month (€{data.previous_month_total.toFixed(2)})
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CategoryDonut({ breakdown, theme }: { breakdown: ApiBreakdownRow[]; theme: typeof DARK }) {
+  if (breakdown.length === 0) {
+    return (
+      <div
+        className="mx-4 rounded-3xl p-5 text-center"
+        style={{ background: theme.card, border: `1px solid ${theme.border}` }}
+      >
+        <p className="text-xs font-medium" style={{ color: theme.dim }}>
+          No spending insights yet. Scan your first receipt to unlock category intelligence.
+        </p>
+      </div>
+    );
+  }
+
+  const total = breakdown.reduce((s, r) => s + r.total, 0);
+  let acc = 0;
+  const stops: string[] = breakdown.map(r => {
+    const start = (acc / total) * 360;
+    acc += r.total;
+    const end = (acc / total) * 360;
+    return `${r.color} ${start}deg ${end}deg`;
+  });
+  const conic = `conic-gradient(${stops.join(", ")})`;
+
+  return (
+    <div
+      className="mx-4 rounded-3xl p-5"
+      style={{ background: theme.card, border: `1px solid ${theme.border}` }}
+    >
+      <p className="text-[10px] font-black uppercase tracking-widest mb-3" style={{ color: theme.dim }}>
+        Spend by category
+      </p>
+      <div className="flex items-center gap-5">
+        <div className="flex-shrink-0" style={{ width: 110, height: 110 }}>
+          <div
+            className="rounded-full"
+            style={{ width: 110, height: 110, background: conic }}
+          />
+        </div>
+        <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+          {breakdown.slice(0, 5).map(row => {
+            const pct = total > 0 ? Math.round((row.total / total) * 100) : 0;
+            return (
+              <div key={row.category} className="flex items-center gap-2">
+                <span
+                  className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                  style={{ background: row.color }}
+                />
+                <p className="text-xs font-bold flex-1 truncate" style={{ color: theme.text }}>
+                  {row.label}
+                </p>
+                <p className="text-xs font-black" style={{ color: theme.dim, fontFamily: FONT_MONO }}>
+                  €{row.total.toFixed(0)} · {pct}%
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InsightCards({ narratives, theme }: { narratives: string[]; theme: typeof DARK }) {
+  return (
+    <div className="mx-4 flex flex-col gap-2">
+      {narratives.map((text, i) => (
+        <div
+          key={i}
+          className="rounded-2xl px-4 py-3 flex items-start gap-2.5"
+          style={{
+            background: `${theme.brand}10`,
+            border: `1px solid ${theme.brand}33`,
+          }}
+        >
+          <Sparkles size={14} style={{ color: theme.brand, marginTop: 2 }} strokeWidth={2.5} />
+          <p className="text-xs font-semibold leading-snug" style={{ color: theme.text }}>
+            {text}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BudgetList({
+  budgets, theme, onEdit,
+}: {
+  budgets: ApiBudgetStatus[];
+  theme: typeof DARK;
+  onEdit: (b: ApiBudgetStatus) => void;
+}) {
+  if (budgets.length === 0) {
+    return (
+      <div className="mx-4">
+        <p className="text-[10px] font-black uppercase tracking-widest mb-2" style={{ color: theme.dim }}>
+          Budgets
+        </p>
+        <div
+          className="rounded-2xl px-4 py-3 text-center"
+          style={{ background: theme.card, border: `1px dashed ${theme.border}` }}
+        >
+          <p className="text-xs font-medium" style={{ color: theme.dim }}>
+            No budgets yet — set one below to get warnings before you overspend.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: theme.dim }}>
+          Budgets
+        </p>
+        <Target size={12} style={{ color: theme.dim }} strokeWidth={2.5} />
+      </div>
+      <div
+        className="rounded-2xl overflow-hidden"
+        style={{ background: theme.card, border: `1px solid ${theme.border}` }}
+      >
+        {budgets.map((b, i) => {
+          const pct = Math.min(100, b.pct_used);
+          const fill = b.status === "over" ? BRAND.red : b.status === "warning" ? BRAND.orange : b.color;
+          return (
+            <button
+              key={b.id}
+              onClick={() => onEdit(b)}
+              className="w-full text-left px-4 py-3 active:opacity-80"
+              style={{
+                borderBottom: i < budgets.length - 1 ? `1px solid ${theme.border}` : "none",
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full" style={{ background: b.color }} />
+                <p className="text-sm font-bold flex-1" style={{ color: theme.text }}>{b.label}</p>
+                {b.status !== "ok" && (
+                  <AlertTriangle size={12} style={{ color: fill }} strokeWidth={3} />
+                )}
+                <p className="text-xs font-black" style={{ color: theme.text, fontFamily: FONT_MONO }}>
+                  €{b.spent.toFixed(0)} <span style={{ color: theme.dim }}>/ €{b.limit.toFixed(0)}</span>
+                </p>
+              </div>
+              <div
+                className="mt-2 h-1.5 rounded-full overflow-hidden"
+                style={{ background: `${theme.dim}22` }}
+              >
+                <div
+                  className="h-full rounded-full transition-all duration-700"
+                  style={{ width: `${pct}%`, background: fill }}
+                />
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BudgetEditorSheet({
+  category, label, color, initialLimit, onClose, onSaved, existingId,
+}: {
+  category: string;
+  label: string;
+  color: string;
+  initialLimit: number;
+  onClose: () => void;
+  onSaved: () => void;
+  existingId?: number;
+}) {
+  const theme = useTheme();
+  const [limit, setLimit] = useState(initialLimit);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const save = async () => {
+    setSaving(true);
+    setErr(null);
+    try {
+      await api.upsertBudget({ category, monthly_limit: Math.max(0, Math.round(limit)) });
+      onSaved();
+    } catch (error) {
+      setErr(error instanceof ApiError ? error.message : "Could not save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!existingId) return;
+    setSaving(true);
+    setErr(null);
+    try {
+      await api.deleteBudget(existingId);
+      onSaved();
+    } catch (error) {
+      setErr(error instanceof ApiError ? error.message : "Could not delete");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-end justify-center"
+      style={{ background: "rgba(0,0,0,0.55)" }}
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-t-3xl p-5 flex flex-col gap-4"
+        style={{ background: theme.card, border: `1px solid ${theme.border}` }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="w-3 h-3 rounded-full" style={{ background: color }} />
+            <p className="text-base font-black" style={{ color: theme.text }}>
+              {label} budget
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1" aria-label="Close">
+            <X size={18} style={{ color: theme.dim }} strokeWidth={2.5} />
+          </button>
+        </div>
+
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest" style={{ color: theme.dim }}>
+            Monthly limit
+          </p>
+          <p
+            className="font-light mt-1"
+            style={{ color: theme.text, fontSize: 32, fontFamily: FONT_MONO, letterSpacing: "-0.02em" }}
+          >
+            €{Math.round(limit)}
+          </p>
+          <input
+            type="range"
+            min={0}
+            max={500}
+            step={5}
+            value={limit}
+            onChange={e => setLimit(Number(e.target.value))}
+            className="w-full mt-2"
+            style={{ accentColor: color }}
+          />
+          <div className="flex justify-between text-[10px] font-bold mt-1" style={{ color: theme.dim }}>
+            <span>€0</span>
+            <span>€500</span>
+          </div>
+        </div>
+
+        {err && (
+          <p className="text-xs font-bold" style={{ color: BRAND.red }}>{err}</p>
+        )}
+
+        <div className="flex gap-2">
+          {existingId && (
+            <button
+              onClick={remove}
+              disabled={saving}
+              className="flex-1 py-3 rounded-2xl font-black text-sm disabled:opacity-60"
+              style={{ background: theme.cardHi, color: BRAND.red, border: `1px solid ${theme.border}` }}
+            >
+              Remove
+            </button>
+          )}
+          <button
+            onClick={save}
+            disabled={saving}
+            className="flex-1 py-3 rounded-2xl font-black text-sm disabled:opacity-60"
+            style={{ background: theme.brand, color: "#000" }}
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Credits modal ─────────────────────────────────────────────────────────────
 
 function CreditsModal({ onClose }: { onClose: () => void }) {
@@ -1847,7 +2495,7 @@ function FriendAvatar({ f, size = 36, fontSize = 12 }: { f: Friend; size?: numbe
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"tally" | "receipts">("tally");
+  const [tab, setTab] = useState<"tally" | "receipts" | "insights">("tally");
   const [showCredits, setShowCredits] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
   const [receiptOpen, setReceiptOpen] = useState(false);
@@ -1866,7 +2514,7 @@ export default function App() {
       .catch(err => console.warn("Failed to load contacts", err));
   }, []);
 
-  const changeTab = (id: "tally" | "receipts") => {
+  const changeTab = (id: "tally" | "receipts" | "insights") => {
     setTab(id);
     setReceiptOpen(false);
   };
@@ -1954,6 +2602,7 @@ export default function App() {
   const tabs = [
     { id: "tally",    label: "Tally",    icon: Users },
     { id: "receipts", label: "Receipts", icon: Clock },
+    { id: "insights", label: "Insights", icon: BarChart3 },
   ] as const;
 
   return (
@@ -1980,7 +2629,7 @@ export default function App() {
                     className="text-2xl font-black tracking-tight"
                     style={{ color: theme.text, fontFamily: FONT_HEAD }}
                   >
-                    {tab === "tally" ? "Tally" : "Tally"}
+                    {tab === "insights" ? "Insights" : tab === "receipts" ? "Receipts" : "Tally"}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -2009,6 +2658,7 @@ export default function App() {
             <div className="flex-1 overflow-y-auto pt-3 pb-28">
               {tab === "tally"    && <TallyScreen onReceiptOpenChange={setReceiptOpen} />}
               {tab === "receipts" && <ReceiptsScreen />}
+              {tab === "insights" && <InsightsScreen />}
             </div>
 
             {/* Floating bottom layer: nav pill + add-contact FAB */}
@@ -2057,8 +2707,8 @@ export default function App() {
                   })}
                 </div>
 
-                {/* Add-contact FAB — hidden once a scanned receipt is open */}
-                {!receiptOpen && (
+                {/* Add-contact FAB — only on Tally tab and not while a receipt is open */}
+                {!receiptOpen && tab === "tally" && (
                   <button
                     onClick={() => setShowContacts(true)}
                     className="pointer-events-auto absolute right-4 bottom-1 w-12 h-12 rounded-full flex items-center justify-center transition-transform active:scale-95"

@@ -183,15 +183,43 @@ class ReceiptController extends Controller
     {
         $receipt->load('paymentRequests.contact');
 
+        // Safety net: actively poll bunq for unpaid splits so the UI flips to "paid"
+        // even when the bunq webhook can't reach this dev environment.
+        $bunq = $this->resolveBunqService();
+        if ($bunq) {
+            foreach ($receipt->paymentRequests as $pr) {
+                if ($pr->paid || ! $pr->bunq_tab_id) {
+                    continue;
+                }
+                try {
+                    if ($bunq->isTabPaid((int) $pr->bunq_tab_id)) {
+                        $pr->update(['paid' => true, 'paid_at' => now(), 'status' => 'paid']);
+                    }
+                } catch (Throwable $e) {
+                    Log::info('bunq isTabPaid check failed for payment request '.$pr->id.': '.$e->getMessage());
+                }
+            }
+            $receipt->load('paymentRequests.contact');
+        }
+
         return response()->json([
             'receipt_id' => $receipt->id,
+            'bunq_available' => $bunq !== null,
             'splits' => $receipt->paymentRequests->map(fn (PaymentRequest $pr) => [
                 'id' => $pr->id,
                 'contact_id' => $pr->contact_id,
-                'amount' => $pr->amount,
+                'contact' => $pr->contact ? [
+                    'id' => $pr->contact->id,
+                    'name' => $pr->contact->name,
+                    'color' => $pr->contact->color,
+                    'phone_number' => $pr->contact->phone_number,
+                ] : null,
+                'amount' => (float) $pr->amount,
                 'status' => $pr->status,
                 'paid' => $pr->paid,
                 'paid_at' => $pr->paid_at,
+                'bunq_tab_id' => $pr->bunq_tab_id,
+                'payment_url' => $pr->payment_url,
             ]),
         ]);
     }

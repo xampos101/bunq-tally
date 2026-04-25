@@ -40,6 +40,63 @@ export interface ApiReceipt {
     splits?: ApiSplit[];
 }
 
+export interface ApiCategoryMeta {
+    key: string;
+    label: string;
+    color: string;
+}
+
+export interface ApiBreakdownRow {
+    category: string;
+    total: number;
+    items: number;
+    label: string;
+    color: string;
+}
+
+export interface ApiMomEntry {
+    current: number;
+    previous: number;
+    delta_pct: number | null;
+}
+
+export interface ApiBudgetStatus {
+    id: number;
+    category: string;
+    label: string;
+    color: string;
+    limit: number;
+    spent: number;
+    pct_used: number;
+    status: 'ok' | 'warning' | 'over';
+}
+
+export interface ApiInsightsDashboard {
+    currency: string;
+    month_total: number;
+    previous_month_total: number;
+    month_delta_pct: number | null;
+    breakdown: ApiBreakdownRow[];
+    month_over_month: Record<string, ApiMomEntry>;
+    narratives: string[];
+    budgets: ApiBudgetStatus[];
+    categories: ApiCategoryMeta[];
+}
+
+export interface ApiInsightsTimeline {
+    months: string[];
+    series: Record<string, { label: string; color: string; totals: number[] }>;
+}
+
+export interface ApiBudget {
+    id: number;
+    category: string;
+    label: string;
+    color: string;
+    monthly_limit: number;
+    currency: string;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set('Accept', 'application/json');
@@ -102,6 +159,16 @@ export const api = {
             splits: (ApiSplit & { contact: ApiContact | null })[];
         }>(`/api/receipts/${id}/split`, { method: 'POST', body: JSON.stringify({}) }),
 
+    getReceiptStatus: (id: number) =>
+        request<{
+            receipt_id: number;
+            bunq_available: boolean;
+            splits: (ApiSplit & {
+                contact: ApiContact | null;
+                paid_at: string | null;
+            })[];
+        }>(`/api/receipts/${id}/status`),
+
     syncPaymentRequest: (id: number) =>
         request<{ paid: boolean; paid_at: string | null }>(`/api/payment-requests/${id}/sync`, {
             method: 'POST',
@@ -133,4 +200,22 @@ export const api = {
             method: 'POST',
             body: JSON.stringify(payload),
         }),
+
+    getInsightsDashboard: () => request<ApiInsightsDashboard>('/api/insights/dashboard'),
+    getInsightsTimeline: (months = 6) =>
+        request<ApiInsightsTimeline>(`/api/insights/timeline?months=${months}`),
+    getBudgetStatus: () => request<{ data: ApiBudgetStatus[] }>('/api/insights/budgets'),
+
+    listBudgets: () => request<{ data: ApiBudget[] }>('/api/budgets'),
+    upsertBudget: (payload: { category: string; monthly_limit: number; currency?: string }) =>
+        request<{ data: ApiBudget }>('/api/budgets', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+        }),
+    updateBudget: (id: number, payload: { monthly_limit?: number; currency?: string }) =>
+        request<{ data: ApiBudget }>(`/api/budgets/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload),
+        }),
+    deleteBudget: (id: number) => request<{ ok: true }>(`/api/budgets/${id}`, { method: 'DELETE' }),
 };
