@@ -29,4 +29,9 @@ class Receipt extends Model
     {
         return $this->hasMany(ReceiptItem::class);
     }
+
+    public function paymentRequests()
+    {
+        return $this->hasMany(PaymentRequest::class);
+    }
 }

@@ -151,77 +151,107 @@ PROMPT;
     {
         $maxEdge = 7680;
         $bytes = (string) file_get_contents($file->getRealPath());
+        $mimeType = (string) $file->getMimeType();
+
+        $storeOriginal = function () use ($file, $bytes, $mimeType): array {
+            $path = $file->store('receipts', 'public');
+
+            return [
+                'path' => $path,
+                'media_type' => $mimeType,
+                'base64' => base64_encode($bytes),
+            ];
+        };
 
         if (! \extension_loaded('gd')) {
-            $path = $file->store('receipts', 'public');
-
-            return [
-                'path' => $path,
-                'media_type' => (string) $file->getMimeType(),
-                'base64' => base64_encode($bytes),
-            ];
+            return $storeOriginal();
         }
 
-        $image = @\imagecreatefromstring($bytes);
-
-        if ($image === false) {
-            $path = $file->store('receipts', 'public');
-
-            return [
-                'path' => $path,
-                'media_type' => (string) $file->getMimeType(),
-                'base64' => base64_encode($bytes),
-            ];
+        $info = @\getimagesizefromstring($bytes);
+        if (! is_array($info) || ! isset($info[0], $info[1])) {
+            return $storeOriginal();
         }
 
-        $width = \imagesx($image);
-        $height = \imagesy($image);
+        $width = (int) $info[0];
+        $height = (int) $info[1];
 
         if ($width <= $maxEdge && $height <= $maxEdge) {
-            \imagedestroy($image);
-            $path = $file->store('receipts', 'public');
-
-            return [
-                'path' => $path,
-                'media_type' => (string) $file->getMimeType(),
-                'base64' => base64_encode($bytes),
-            ];
+            return $storeOriginal();
         }
 
         $scale = min($maxEdge / $width, $maxEdge / $height);
         $newWidth = (int) max(1, round($width * $scale));
         $newHeight = (int) max(1, round($height * $scale));
 
-        $scaled = \imagescale($image, $newWidth, $newHeight);
-        \imagedestroy($image);
-
-        if ($scaled === false) {
-            $path = $file->store('receipts', 'public');
-
-            return [
-                'path' => $path,
-                'media_type' => (string) $file->getMimeType(),
-                'base64' => base64_encode($bytes),
-            ];
+        $estimatedDecodeBytes = $width * $height * 4;
+        $estimatedScaledBytes = $newWidth * $newHeight * 4;
+        $requiredBytes = (int) (($estimatedDecodeBytes + $estimatedScaledBytes) * 1.5) + 64 * 1024 * 1024;
+        $previousMemoryLimit = (string) ini_get('memory_limit');
+        $bumpedMemory = false;
+        if ($this->memoryLimitInBytes($previousMemoryLimit) < $requiredBytes) {
+            @ini_set('memory_limit', max($requiredBytes, 512 * 1024 * 1024).'');
+            $bumpedMemory = true;
         }
 
-        if (\function_exists('imagepalettetotruecolor') && ! \imageistruecolor($scaled)) {
-            \imagepalettetotruecolor($scaled);
-        }
+        try {
+            $image = @\imagecreatefromstring($bytes);
+            if ($image === false) {
+                return $storeOriginal();
+            }
 
-        \ob_start();
-        \imagejpeg($scaled, null, 88);
-        $jpegBytes = (string) \ob_get_clean();
-        \imagedestroy($scaled);
+            $scaled = \imagescale($image, $newWidth, $newHeight);
+            \imagedestroy($image);
+
+            if ($scaled === false) {
+                return $storeOriginal();
+            }
+
+            if (\function_exists('imagepalettetotruecolor') && ! \imageistruecolor($scaled)) {
+                \imagepalettetotruecolor($scaled);
+            }
+
+            \ob_start();
+            \imagejpeg($scaled, null, 88);
+            $jpegBytes = (string) \ob_get_clean();
+            \imagedestroy($scaled);
+        } finally {
+            if ($bumpedMemory) {
+                @ini_set('memory_limit', $previousMemoryLimit);
+            }
+        }
 
         $path = 'receipts/'.Str::uuid()->toString().'.jpg';
         Storage::disk('public')->put($path, $jpegBytes);
+
+        Log::info('Receipt image resized for Anthropic scan', [
+            'original' => ['width' => $width, 'height' => $height],
+            'resized' => ['width' => $newWidth, 'height' => $newHeight],
+            'path' => $path,
+        ]);
 
         return [
             'path' => $path,
             'media_type' => 'image/jpeg',
             'base64' => base64_encode($jpegBytes),
         ];
+    }
+
+    private function memoryLimitInBytes(string $limit): int
+    {
+        $limit = trim($limit);
+        if ($limit === '' || $limit === '-1') {
+            return PHP_INT_MAX;
+        }
+
+        $unit = strtolower(substr($limit, -1));
+        $value = (int) $limit;
+
+        return match ($unit) {
+            'g' => $value * 1024 * 1024 * 1024,
+            'm' => $value * 1024 * 1024,
+            'k' => $value * 1024,
+            default => (int) $limit,
+        };
     }
 
     private function extractJson(?string $text): ?array
