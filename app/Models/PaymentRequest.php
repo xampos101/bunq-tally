@@ -7,15 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class PaymentRequest extends Model
 {
-    protected $fillable = [
-        'receipt_id',
-        'contact_id',
-        'amount',
-        'paid',
-        'paid_at',
-        'status',
-        'whatsapp_message_id',
-    ];
+    protected $fillable = ['contact_id', 'amount', 'paid', 'paid_at', 'bunq_tab_id', 'payment_url'];
 
     protected $casts = [
         'amount' => 'decimal:2',
