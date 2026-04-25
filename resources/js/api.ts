@@ -6,6 +6,7 @@ export interface ApiContact {
     color: string | null;
     initials: string;
     phone_number: string | null;
+    country_code: string | null;
     iban: string | null;
     whatsapp_profile_pic: string | null;
 }
@@ -24,6 +25,8 @@ export interface ApiSplit {
     amount: number;
     status: string;
     paid: boolean;
+    bunq_tab_id?: number | null;
+    payment_url?: string | null;
 }
 
 export interface ApiReceipt {
@@ -78,9 +81,9 @@ export class ApiError extends Error {
 
 export const api = {
     listContacts: () => request<{ data: ApiContact[] }>('/api/contacts'),
-    createContact: (payload: { name: string; phone_number: string; color?: string | null; iban?: string | null }) =>
+    createContact: (payload: { name: string; phone_number: string; color?: string | null; country_code?: string | null; iban?: string | null }) =>
         request<{ data: ApiContact }>('/api/contacts', { method: 'POST', body: JSON.stringify(payload) }),
-    updateContact: (id: number, payload: Partial<{ name: string; phone_number: string; color: string | null; iban: string | null }>) =>
+    updateContact: (id: number, payload: Partial<{ name: string; phone_number: string; color: string | null; country_code: string | null; iban: string | null; whatsapp_profile_pic: string | null }>) =>
         request<{ data: ApiContact }>(`/api/contacts/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
     deleteContact: (id: number) => request<{ ok: true }>(`/api/contacts/${id}`, { method: 'DELETE' }),
 
@@ -92,21 +95,38 @@ export const api = {
             body: JSON.stringify({ allocations }),
         }),
     splitReceipt: (id: number) =>
-        request<{ ok: true; receipt_id: number; splits: (ApiSplit & { contact: ApiContact | null })[] }>(
-            `/api/receipts/${id}/split`,
-            { method: 'POST', body: JSON.stringify({}) },
-        ),
+        request<{
+            ok: true;
+            receipt_id: number;
+            bunq_available: boolean;
+            splits: (ApiSplit & { contact: ApiContact | null })[];
+        }>(`/api/receipts/${id}/split`, { method: 'POST', body: JSON.stringify({}) }),
+
+    syncPaymentRequest: (id: number) =>
+        request<{ paid: boolean; paid_at: string | null }>(`/api/payment-requests/${id}/sync`, {
+            method: 'POST',
+            body: JSON.stringify({}),
+        }),
 
     scanReceipt: (file: File) => {
         const fd = new FormData();
         fd.append('image', file);
         return request<{
             ok: boolean;
-            receipt: { id: number; store: string | null; total_price: string; currency: string | null };
+            receipt: {
+                id: number;
+                store: string | null;
+                total_price: string;
+                currency: string | null;
+                items?: { id: number; item_name: string; price: number | string; quantity: number }[];
+            };
             image_url: string;
             parsed: { merchant: string; currency: string; date: string | null; items: { name: string; price: number }[]; total: number };
         }>('/api/claude/scan', { method: 'POST', body: fd });
     },
+
+    getWhatsappProfilePic: (phone_number: string) =>
+        request<{ url: string | null }>(`/api/whatsapp/profile-pic?${new URLSearchParams({ phone_number })}`),
 
     sendWhatsapp: (payload: { phone_number: string; message: string }) =>
         request<{ ok: true } | Record<string, unknown>>('/api/whatsapp/send-text', {

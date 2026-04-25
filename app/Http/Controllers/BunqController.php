@@ -23,15 +23,20 @@ class BunqController extends Controller
         $data = $request->validate([
             'amount'      => ['required', 'numeric', 'min:0.01'],
             'description' => ['sometimes', 'string', 'max:140'],
+            'contact_id'  => ['sometimes', 'integer', 'exists:contacts,id'],
+            'receipt_id'  => ['sometimes', 'integer', 'exists:receipts,id'],
         ]);
 
-        $description = $data['description'] ?? "Payment request";
+        $description = $data['description'] ?? 'Payment request';
 
         $link = $this->bunq->createPaymentLink((float) $data['amount'], $description);
 
         $paymentRequest = PaymentRequest::create([
+            'receipt_id'  => $data['receipt_id'] ?? null,
+            'contact_id'  => $data['contact_id'] ?? null,
             'amount'      => $data['amount'],
             'paid'        => false,
+            'status'      => 'pending',
             'bunq_tab_id' => $link['tab_id'],
             'payment_url' => $link['url'],
         ]);

@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Contact extends Model
 {
-    protected $fillable = ['name', 'color', 'phone_number', 'whatsapp_profile_pic', 'iban'];
+    protected $fillable = ['name', 'color', 'phone_number', 'country_code', 'whatsapp_profile_pic', 'iban'];
 
     public function paymentRequests(): HasMany
     {

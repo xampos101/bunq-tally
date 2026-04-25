@@ -23,6 +23,7 @@ interface Friend {
   color: string;
   initials: string;
   phone?: string;
+  profilePic?: string | null;
 }
 
 interface ReceiptItem {
@@ -79,6 +80,7 @@ const COLOR_PALETTE = [
   BRAND.red,
 ];
 
+
 const DARK = {
   bg:     "#000000",
   card:   "#0E0E10",
@@ -117,6 +119,12 @@ function getInitials(name: string): string {
   const parts = trimmed.split(/\s+/);
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+function isValidPhone(phone: string): boolean {
+  const t = phone.trim();
+  if (!t || !t.startsWith('+')) return false;
+  return t.replace(/\D/g, '').length >= 7;
 }
 
 const INITIAL_FRIENDS: Friend[] = [
@@ -486,7 +494,7 @@ function FriendSelector({ allocation, onAssign, onManage }: FriendSelectorProps)
               className="flex flex-col items-center gap-1.5 active:scale-90 transition-transform flex-shrink-0"
             >
               <div
-                className="w-12 h-12 rounded-full flex items-center justify-center text-white font-black text-xs relative transition-all"
+                className="w-12 h-12 rounded-full flex items-center justify-center text-white font-black text-xs relative transition-all overflow-hidden"
                 style={{
                   background: f.color,
                   transform: active ? "scale(1.08)" : "scale(1)",
@@ -494,7 +502,9 @@ function FriendSelector({ allocation, onAssign, onManage }: FriendSelectorProps)
                   boxShadow: active ? `0 0 16px ${f.color}80` : "none",
                 }}
               >
-                {f.initials}
+                {f.profilePic
+                  ? <img src={f.profilePic} alt={f.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  : f.initials}
                 {active && (
                   <div
                     className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center"
@@ -556,7 +566,8 @@ function ContactsManager({ onClose }: { onClose: () => void }) {
   const startEdit = (f: Friend) => {
     setEditingId(f.id);
     setAdding(false);
-    setDraft({ name: f.name, color: f.color, phone: f.phone ?? "" });
+    const phone = f.phone?.startsWith('tmp-') ? '' : (f.phone ?? '');
+    setDraft({ name: f.name, color: f.color, phone });
   };
 
   const startAdd = () => {
@@ -662,12 +673,7 @@ function ContactsManager({ onClose }: { onClose: () => void }) {
                   className="flex items-center gap-3 rounded-2xl px-3 py-2.5"
                   style={{ background: theme.cardHi }}
                 >
-                  <div
-                    className="w-9 h-9 rounded-full flex items-center justify-center text-white text-xs font-black flex-shrink-0"
-                    style={{ background: f.color, fontFamily: FONT_HEAD }}
-                  >
-                    {f.initials}
-                  </div>
+                  <FriendAvatar f={f} size={36} fontSize={12} />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-semibold" style={{ color: theme.text, fontFamily: FONT_HEAD }}>
                       {f.name}
@@ -728,6 +734,12 @@ function FriendForm({
   onDelete,
   primaryLabel,
 }: FriendFormProps) {
+  const phoneOk = isValidPhone(draft.phone);
+  const phoneError = draft.phone.trim() && !phoneOk
+    ? 'Include country code: +31 6 12345678'
+    : null;
+  const canSave = !!draft.name.trim() && phoneOk;
+
   return (
     <div
       className="rounded-2xl p-4 mb-4"
@@ -771,6 +783,11 @@ function FriendForm({
           className="w-full bg-transparent text-sm focus:outline-none"
           style={{ color: theme.text, fontFamily: FONT_MONO }}
         />
+        {phoneError && (
+          <p className="text-[10px] font-semibold" style={{ color: BRAND.red }}>
+            ⚠ {phoneError}
+          </p>
+        )}
       </div>
 
       <div
@@ -824,7 +841,7 @@ function FriendForm({
         </button>
         <button
           onClick={onSave}
-          disabled={!draft.name.trim()}
+          disabled={!canSave}
           className="flex-1 py-2.5 rounded-2xl text-sm font-black transition-all active:scale-95 disabled:opacity-40"
           style={{ background: theme.brand, color: "#000" }}
         >
@@ -838,6 +855,8 @@ function FriendForm({
 // ── Tally screen ──────────────────────────────────────────────────────────────
 
 type TallyPhase = "start" | "camera" | "scanning" | "split" | "sending" | "done";
+
+type FailedSend = { name: string; phone: string; message: string };
 
 interface TallyScreenProps {
   onReceiptOpenChange: (open: boolean) => void;
@@ -860,6 +879,9 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
   const [allocations, setAllocations] = useState<Allocations>({});
   const [scanned, setScanned] = useState<ScannedReceipt | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [splitWarnings, setSplitWarnings] = useState<string[]>([]);
+  const [failedSends, setFailedSends] = useState<FailedSend[]>([]);
+  const [retrying, setRetrying] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const currentItems: ReceiptItem[] = scanned?.items ?? receiptItems;
@@ -886,12 +908,21 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
 
     try {
       const result = await api.scanReceipt(file);
-      const items: ReceiptItem[] = result.parsed.items.map((it, i) => ({
-        id: i + 1,
-        name: it.name,
-        price: it.price,
-        quantity: 1,
-      }));
+      // Use persisted DB item IDs from the backend so allocations map correctly.
+      const itemsFromDb = result.receipt.items?.map((it) => ({
+        id: it.id,
+        name: it.item_name,
+        price: Number(it.price),
+        quantity: Number(it.quantity) || 1,
+      })) ?? [];
+      const items: ReceiptItem[] = itemsFromDb.length > 0
+        ? itemsFromDb
+        : result.parsed.items.map((it, i) => ({
+            id: i + 1,
+            name: it.name,
+            price: it.price,
+            quantity: 1,
+          }));
 
       setScanned({
         id: result.receipt.id,
@@ -936,22 +967,53 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
       await api.saveAllocations(scanned.id, buildAllocationsPayload());
       const splitResult = await api.splitReceipt(scanned.id);
 
+      const sends = splitResult.splits.map(s => {
+        const phone = s.contact?.phone_number;
+        const name = s.contact?.name ?? "friend";
+        if (!phone || phone.startsWith('tmp-')) {
+          return { phone: null as null, name, message: '' };
+        }
+        const amount = Number(s.amount).toFixed(2);
+        const baseLine = `Hi ${name}! Your share for ${scanned.merchant} on Tally is ${scanned.currency} ${amount}.`;
+        const message = s.payment_url
+          ? `${baseLine}\nPay securely with bunq.me: ${s.payment_url}`
+          : `${baseLine}\nReply here when you've sent it.`;
+        return { phone, name, message };
+      });
+
       const whatsappOutcomes = await Promise.allSettled(
-        splitResult.splits.map(s => {
-          const phone = s.contact?.phone_number;
-          if (!phone) {
-            return Promise.reject(new Error(`Missing phone for ${s.contact?.name ?? "contact"}`));
-          }
-          const message = `Tally: your share for ${scanned.merchant} is ${scanned.currency} ${Number(
-            s.amount,
-          ).toFixed(2)}.`;
-          return api.sendWhatsapp({ phone_number: phone, message });
-        }),
+        sends.map(s =>
+          s.phone
+            ? api.sendWhatsapp({ phone_number: s.phone, message: s.message })
+            : Promise.reject(new Error("No phone number on file"))
+        ),
       );
 
-      const failures = whatsappOutcomes.filter(o => o.status === "rejected").length;
-      if (failures > 0) {
-        setErrorMessage(`Sent splits, but ${failures} WhatsApp message(s) failed.`);
+      const warnings: string[] = [];
+      const newFailedSends: FailedSend[] = [];
+      whatsappOutcomes.forEach((outcome, idx) => {
+        if (outcome.status === "rejected") {
+          const s = sends[idx];
+          const reason = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+          warnings.push(`${s.name}: ${reason}`);
+          if (s.phone) {
+            newFailedSends.push({ name: s.name, phone: s.phone, message: s.message });
+          }
+        }
+      });
+
+      const missingLinks = splitResult.splits.filter(s => !s.payment_url).length;
+      const notes: string[] = [];
+      if (!splitResult.bunq_available) {
+        notes.push("bunq not configured — no payment links generated");
+      } else if (missingLinks > 0) {
+        notes.push(`${missingLinks} payment link(s) could not be created`);
+      }
+
+      setSplitWarnings(warnings);
+      setFailedSends(newFailedSends);
+      if (notes.length > 0) {
+        setErrorMessage(notes.join("; "));
       }
       setPhase("done");
     } catch (err) {
@@ -961,11 +1023,35 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
     }
   };
 
+  const handleRetry = async () => {
+    if (retrying || failedSends.length === 0) return;
+    setRetrying(true);
+    const retryOutcomes = await Promise.allSettled(
+      failedSends.map(s => api.sendWhatsapp({ phone_number: s.phone, message: s.message })),
+    );
+    const stillFailed: FailedSend[] = [];
+    const newWarnings: string[] = [];
+    retryOutcomes.forEach((outcome, idx) => {
+      if (outcome.status === "rejected") {
+        const s = failedSends[idx];
+        const reason = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+        newWarnings.push(`${s.name}: ${reason}`);
+        stillFailed.push(s);
+      }
+    });
+    setFailedSends(stillFailed);
+    setSplitWarnings(newWarnings);
+    setRetrying(false);
+  };
+
   const reset = () => {
     setSelected(null);
     setAllocations({});
     setScanned(null);
     setErrorMessage(null);
+    setSplitWarnings([]);
+    setFailedSends([]);
+    setRetrying(false);
     setPhase("start");
     onReceiptOpenChange(false);
   };
@@ -1041,14 +1127,18 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
           <div className="flex items-center gap-3">
             <div
               className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0"
-              style={{ background: theme.brand }}
+              style={{ background: splitWarnings.length === 0 ? theme.brand : BRAND.orange }}
             >
               <Check size={20} className="text-white" strokeWidth={3} />
             </div>
             <div>
-              <p className="font-bold" style={{ color: theme.text }}>WhatsApp reminders sent!</p>
+              <p className="font-bold" style={{ color: theme.text }}>
+                {splitWarnings.length === 0 ? "WhatsApp reminders sent!" : "Split done — some issues"}
+              </p>
               <p className="text-xs mt-0.5" style={{ color: theme.dim }}>
-                {friendTotals.length} friend{friendTotals.length === 1 ? "" : "s"} notified
+                {splitWarnings.length === 0
+                  ? `${friendTotals.length} friend${friendTotals.length === 1 ? "" : "s"} notified`
+                  : `${friendTotals.length - splitWarnings.length} of ${friendTotals.length} notified`}
               </p>
             </div>
           </div>
@@ -1059,18 +1149,39 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
                 className="flex items-center gap-3 rounded-2xl px-3 py-2"
                 style={{ background: theme.cardHi }}
               >
-                <div
-                  className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-black flex-shrink-0"
-                  style={{ background: f.color }}
-                >
-                  {f.initials}
-                </div>
+                <FriendAvatar f={f} size={32} fontSize={11} />
                 <p className="text-sm font-semibold flex-1" style={{ color: theme.text }}>{f.name}</p>
                 <p className="text-sm font-black" style={{ color: theme.text }}>€{f.total.toFixed(2)}</p>
               </div>
             ))}
           </div>
         </div>
+        {splitWarnings.length > 0 && (
+          <div
+            className="rounded-2xl px-4 py-3"
+            style={{ background: `${BRAND.red}14`, border: `1px solid ${BRAND.red}33` }}
+          >
+            <p className="text-[11px] font-bold mb-1.5" style={{ color: BRAND.red }}>
+              Delivery issues — please follow up:
+            </p>
+            {splitWarnings.map((w, i) => (
+              <p key={i} className="text-[11px] font-medium" style={{ color: BRAND.red }}>{w}</p>
+            ))}
+          </div>
+        )}
+        {failedSends.length > 0 && (
+          <button
+            onClick={handleRetry}
+            disabled={retrying}
+            className="py-3.5 rounded-2xl text-sm font-black flex items-center justify-center gap-2 transition-all active:scale-95 disabled:opacity-60"
+            style={{ background: BRAND.orange, color: "#000" }}
+          >
+            {retrying
+              ? <><Loader2 size={16} className="animate-spin" strokeWidth={3} /> Retrying…</>
+              : `Retry ${failedSends.length} failed`
+            }
+          </button>
+        )}
         <button
           onClick={reset}
           className="py-3.5 rounded-2xl text-sm font-bold"
@@ -1238,25 +1349,45 @@ function TallyScreen({ onReceiptOpenChange }: TallyScreenProps) {
           </p>
         )}
 
-        {anyAssigned && (
-          <div className="mx-4">
-            <button
-              onClick={handleConfirm}
-              disabled={phase === "sending"}
-              className={`w-full py-4 rounded-2xl font-black text-base transition-all active:scale-95 flex items-center justify-center gap-2 ${phase === "sending" ? "opacity-80" : ""}`}
-              style={{ background: theme.brand, color: "#000" }}
-            >
-              {phase === "sending" ? (
-                <><Loader2 size={18} className="animate-spin" strokeWidth={3} /> Sending reminders…</>
-              ) : (
-                <>
-                  <Check size={18} strokeWidth={3} />
-                  Confirm Split
-                </>
+        {anyAssigned && (() => {
+          const noPhone = friendTotals.filter(
+            f => !f.phone || f.phone.startsWith('tmp-') || !isValidPhone(f.phone)
+          );
+          return (
+            <div className="mx-4 flex flex-col gap-2">
+              {noPhone.length > 0 && (
+                <div
+                  className="rounded-2xl px-4 py-3"
+                  style={{ background: `${BRAND.orange}18`, border: `1px solid ${BRAND.orange}44` }}
+                >
+                  <p className="text-[11px] font-bold" style={{ color: BRAND.orange }}>
+                    Won't receive WhatsApp (no valid phone):
+                  </p>
+                  {noPhone.map(f => (
+                    <p key={f.id} className="text-[11px] font-medium mt-0.5" style={{ color: BRAND.orange }}>
+                      · {f.name}
+                    </p>
+                  ))}
+                </div>
               )}
-            </button>
-          </div>
-        )}
+              <button
+                onClick={handleConfirm}
+                disabled={phase === "sending"}
+                className={`w-full py-4 rounded-2xl font-black text-base transition-all active:scale-95 flex items-center justify-center gap-2 ${phase === "sending" ? "opacity-80" : ""}`}
+                style={{ background: theme.brand, color: "#000" }}
+              >
+                {phase === "sending" ? (
+                  <><Loader2 size={18} className="animate-spin" strokeWidth={3} /> Sending reminders…</>
+                ) : (
+                  <>
+                    <Check size={18} strokeWidth={3} />
+                    Confirm Split
+                  </>
+                )}
+              </button>
+            </div>
+          );
+        })()}
 
         {hiddenInput}
     </div>
@@ -1339,12 +1470,7 @@ function ReceiptDetailModal({ receipt, onClose }: { receipt: PastReceipt; onClos
                 className="flex items-center gap-3 rounded-2xl px-3 py-2.5"
                 style={{ background: theme.cardHi }}
               >
-                <div
-                  className="w-9 h-9 rounded-full flex items-center justify-center text-white text-xs font-black flex-shrink-0"
-                  style={{ background: f.color }}
-                >
-                  {f.initials}
-                </div>
+                <FriendAvatar f={f} size={36} fontSize={12} />
                 <p className="text-sm font-semibold flex-1" style={{ color: theme.text }}>
                   {f.name}
                 </p>
@@ -1417,16 +1543,7 @@ function ReceiptDetailModal({ receipt, onClose }: { receipt: PastReceipt; onClos
                           className="flex items-center gap-1.5 rounded-full py-0.5 pr-2.5 pl-0.5"
                           style={{ background: `${f.color}1F` }}
                         >
-                          <div
-                            className="w-5 h-5 rounded-full flex items-center justify-center text-white"
-                            style={{
-                              background: f.color,
-                              fontSize: 8,
-                              fontWeight: 800,
-                            }}
-                          >
-                            {f.initials}
-                          </div>
+                          <FriendAvatar f={f} size={20} fontSize={8} />
                           <span
                             className="text-[11px] font-bold"
                             style={{
@@ -1689,7 +1806,40 @@ function contactToFriend(c: ApiContact, fallbackColor: string): Friend {
     color: c.color ?? fallbackColor,
     initials: c.initials ?? getInitials(c.name),
     phone: c.phone_number ?? undefined,
+    profilePic: c.whatsapp_profile_pic,
   };
+}
+
+function FriendAvatar({ f, size = 36, fontSize = 12 }: { f: Friend; size?: number; fontSize?: number }) {
+  if (f.profilePic) {
+    return (
+      <img
+        src={f.profilePic}
+        alt={f.name}
+        style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }}
+      />
+    );
+  }
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: "50%",
+        background: f.color,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "#fff",
+        fontSize,
+        fontWeight: 900,
+        flexShrink: 0,
+        fontFamily: FONT_HEAD,
+      }}
+    >
+      {f.initials}
+    </div>
+  );
 }
 
 export default function App() {
@@ -1717,15 +1867,25 @@ export default function App() {
     setReceiptOpen(false);
   };
 
+  const fetchAndStoreProfilePic = useCallback(async (contactId: number, phone: string, color: string) => {
+    if (!phone || phone.startsWith("tmp-")) return;
+    try {
+      const { url } = await api.getWhatsappProfilePic(phone);
+      if (!url) return;
+      const { data } = await api.updateContact(contactId, { whatsapp_profile_pic: url });
+      setFriends(prev => prev.map(f => f.id === contactId ? contactToFriend(data, color) : f));
+    } catch {
+      // profile pic is optional — silently skip
+    }
+  }, []);
+
   const addFriend = useCallback(
     async (name: string, color: string, phone?: string) => {
       try {
-        const { data } = await api.createContact({
-          name,
-          color,
-          phone_number: phone && phone.trim() !== "" ? phone : `tmp-${Date.now()}`,
-        });
+        const phoneVal = phone && phone.trim() !== "" ? phone.trim() : `tmp-${Date.now()}`;
+        const { data } = await api.createContact({ name, color, phone_number: phoneVal });
         setFriends(prev => [...prev, contactToFriend(data, color)]);
+        fetchAndStoreProfilePic(data.id, phoneVal, color);
       } catch (err) {
         if (err instanceof ApiError) {
           alert(`Could not add contact: ${err.message}`);
@@ -1734,7 +1894,7 @@ export default function App() {
         }
       }
     },
-    []
+    [fetchAndStoreProfilePic]
   );
 
   const updateFriend = useCallback(
@@ -1749,9 +1909,12 @@ export default function App() {
         if (updates.phone !== undefined) payload.phone_number = updates.phone;
 
         const { data } = await api.updateContact(id, payload);
-        setFriends(prev =>
-          prev.map(f => (f.id === id ? contactToFriend(data, f.color) : f))
-        );
+        const color = updates.color ?? (friends.find(f => f.id === id)?.color ?? BRAND.green);
+        setFriends(prev => prev.map(f => (f.id === id ? contactToFriend(data, color) : f)));
+
+        if (updates.phone) {
+          fetchAndStoreProfilePic(id, updates.phone, color);
+        }
       } catch (err) {
         if (err instanceof ApiError) {
           alert(`Could not update contact: ${err.message}`);
@@ -1760,7 +1923,7 @@ export default function App() {
         }
       }
     },
-    []
+    [friends, fetchAndStoreProfilePic]
   );
 
   const deleteFriend = useCallback(async (id: number) => {

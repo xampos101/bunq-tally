@@ -14,6 +14,8 @@ class BunqSetup extends Command
 
     public function handle(): int
     {
+        $this->ensureWindowsOpenSslConfig();
+
         $contextPath = storage_path('app/bunq_context.json');
 
         if (file_exists($contextPath)) {
@@ -59,5 +61,49 @@ class BunqSetup extends Command
         }
 
         return self::FAILURE;
+    }
+
+    private function ensureWindowsOpenSslConfig(): void
+    {
+        if (PHP_OS_FAMILY !== 'Windows' || getenv('OPENSSL_CONF')) {
+            return;
+        }
+
+        foreach ([
+            'C:/xampp/apache/conf/openssl.cnf',
+            'C:/xampp/php/extras/openssl/openssl.cnf',
+            'C:/xampp/php/extras/ssl/openssl.cnf',
+        ] as $path) {
+            if (file_exists($path)) {
+                $resolved = realpath($path) ?: $path;
+                putenv("OPENSSL_CONF={$resolved}");
+                $_ENV['OPENSSL_CONF'] = $resolved;
+                $_SERVER['OPENSSL_CONF'] = $resolved;
+                $this->line("Using OPENSSL_CONF={$resolved}");
+                return;
+            }
+        }
+
+        $fallbackPath = storage_path('app/openssl.cnf');
+        if (!file_exists($fallbackPath)) {
+            file_put_contents($fallbackPath, <<<CONF
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+
+[provider_sect]
+default = default_sect
+
+[default_sect]
+activate = 1
+CONF);
+        }
+
+        $resolved = realpath($fallbackPath) ?: $fallbackPath;
+        putenv("OPENSSL_CONF={$resolved}");
+        $_ENV['OPENSSL_CONF'] = $resolved;
+        $_SERVER['OPENSSL_CONF'] = $resolved;
+        $this->line("Using generated OPENSSL_CONF={$resolved}");
     }
 }

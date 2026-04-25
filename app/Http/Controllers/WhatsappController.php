@@ -9,15 +9,40 @@ use Illuminate\Support\Facades\Log;
 
 class WhatsappController extends Controller
 {
+    public function getProfilePic(Request $request): JsonResponse
+    {
+        $data = $request->validate(['phone_number' => 'required|string']);
+
+        $base = rtrim((string) config('services.openwa.url'), '/');
+        $apiKey = config('services.openwa.api_key');
+        $sessionId = config('services.openwa.session_id');
+
+        if (! $base || ! $apiKey || ! $sessionId) {
+            return response()->json(['url' => null], 200);
+        }
+
+        $chatId = preg_replace('/\D/', '', $data['phone_number']).'@c.us';
+        $headers = ['X-API-Key' => $apiKey, 'Accept' => 'application/json'];
+
+        $response = Http::withHeaders($headers)
+            ->get("{$base}/api/sessions/{$sessionId}/contacts/{$chatId}/profile-picture");
+
+        if ($response->failed()) {
+            return response()->json(['url' => null], 200);
+        }
+
+        $body = $response->json();
+        $url = $body['profilePictureURL'] ?? $body['url'] ?? $body['profilePicUrl'] ?? null;
+
+        return response()->json(['url' => $url]);
+    }
+
     public function sendText(Request $request): JsonResponse
     {
         $data = $request->validate([
             'phone_number' => 'required|string',
-            'message' => 'required|string',
+            'message'      => 'required|string',
         ]);
-
-        $data['phone'] = $data['phone_number'];
-        $data['text'] = $data['message'];
 
         $base = rtrim((string) config('services.openwa.url'), '/');
         $apiKey = config('services.openwa.api_key');
@@ -25,13 +50,14 @@ class WhatsappController extends Controller
 
         if (! $base || ! $apiKey || ! $sessionId) {
             return response()->json([
-                'error' => 'OpenWA is not configured. Set OPENWA_URL, OPENWA_API_KEY and OPENWA_SESSION_ID in .env.',
+                'message' => 'WhatsApp is not configured on this server.',
+                'code'    => 'not_configured',
             ], 503);
         }
 
         $openwaHeaders = [
             'X-API-Key' => $apiKey,
-            'Accept' => 'application/json',
+            'Accept'    => 'application/json',
         ];
 
         $sessionCheck = Http::withHeaders($openwaHeaders)
@@ -39,47 +65,46 @@ class WhatsappController extends Controller
 
         if (! $sessionCheck->successful()) {
             return response()->json([
-                'error' => 'OpenWA session lookup failed',
-                'status' => $sessionCheck->status(),
-                'body' => $sessionCheck->json() ?? $sessionCheck->body(),
+                'message' => 'WhatsApp session check failed.',
+                'code'    => 'session_lookup_failed',
             ], 502);
         }
 
         $sessionState = $sessionCheck->json('status');
         if ($sessionState !== 'ready') {
             return response()->json([
-                'error' => 'OpenWA session is not connected; cannot send yet.',
+                'message'        => 'WhatsApp is not connected. Scan the QR code in the OpenWA dashboard and retry.',
+                'code'           => 'session_not_ready',
                 'session_status' => $sessionState,
-                'fix' => 'In OpenWA: open GET /api/sessions/{id}/qr (or the dashboard at port 2886), scan the QR with WhatsApp, then retry when session status is "ready".',
             ], 503);
         }
 
-        $chatId = preg_replace('/\D/', '', $data['phone']).'@c.us';
+        $chatId = preg_replace('/\D/', '', $data['phone_number']).'@c.us';
         $url = "{$base}/api/sessions/{$sessionId}/messages/send-text";
 
         $response = Http::withHeaders($openwaHeaders)->post($url, [
             'chatId' => $chatId,
-            'text' => $data['text'],
+            'text'   => $data['message'],
         ]);
 
         if ($response->failed()) {
             Log::warning('OpenWA send-text failed', [
                 'status' => $response->status(),
-                'body' => $response->body(),
+                'body'   => $response->body(),
                 'chatId' => $chatId,
             ]);
 
             return response()->json([
-                'error' => 'OpenWA request failed',
-                'status' => $response->status(),
-                'body' => $response->json() ?? $response->body(),
+                'message'         => 'WhatsApp delivery failed.',
+                'code'            => 'upstream_error',
+                'upstream_status' => $response->status(),
             ], 502);
         }
 
         return response()->json([
-            'ok' => true,
+            'ok'     => true,
             'chatId' => $chatId,
-            'data' => $response->json(),
+            'data'   => $response->json(),
         ]);
     }
 }

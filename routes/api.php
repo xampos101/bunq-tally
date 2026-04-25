@@ -24,9 +24,12 @@ Route::get('/receipts/{receipt}/status', [ReceiptController::class, 'status']);
 Route::post('/claude/scan', [ClaudeController::class, 'scan']);
 
 // WhatsApp
+Route::get('/whatsapp/profile-pic', [WhatsappController::class, 'getProfilePic']);
 Route::post('/whatsapp/send-text', [WhatsappController::class, 'sendText']);
 
 // bunq payment requests
 Route::post('/payment-requests', [BunqController::class, 'createPaymentRequest']);
 Route::post('/payment-requests/{paymentRequest}/sync', [BunqController::class, 'syncPaymentStatus']);
+
+// bunq calls this URL when a payment lands - no auth, no CSRF.
 Route::post('/bunq/webhook', [BunqController::class, 'webhook']);

@@ -6,10 +6,13 @@ use App\Models\Contact;
 use App\Models\PaymentRequest;
 use App\Models\Receipt;
 use App\Models\ReceiptItemAllocation;
+use App\Services\BunqService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Throwable;
 
 class ReceiptController extends Controller
 {
@@ -45,13 +48,22 @@ class ReceiptController extends Controller
         ]);
 
         $itemIds = $receipt->items()->pluck('id')->all();
+        $invalidItemIds = collect($data['allocations'])
+            ->pluck('receipt_item_id')
+            ->filter(fn ($id) => ! in_array((int) $id, $itemIds, true))
+            ->unique()
+            ->values()
+            ->all();
+
+        if (! empty($invalidItemIds)) {
+            return response()->json([
+                'message' => 'Some allocation items do not belong to this receipt.',
+                'invalid_receipt_item_ids' => $invalidItemIds,
+            ], 422);
+        }
 
         DB::transaction(function () use ($data, $itemIds) {
             foreach ($data['allocations'] as $row) {
-                if (! in_array($row['receipt_item_id'], $itemIds, true)) {
-                    continue;
-                }
-
                 ReceiptItemAllocation::where('receipt_item_id', $row['receipt_item_id'])->delete();
 
                 foreach (array_unique($row['contact_ids'] ?? []) as $contactId) {
@@ -68,28 +80,55 @@ class ReceiptController extends Controller
     }
 
     /**
-     * Compute per-contact totals from current allocations and create/update payment_requests.
+     * Compute per-contact totals from current allocations, create payment_requests
+     * and (best-effort) generate a bunq.me payment link per contact.
      */
     public function split(Receipt $receipt): JsonResponse
     {
-        $receipt->load('items.allocations');
+        $receipt->load(['items.allocations', 'paymentRequests']);
         $totals = $this->computePerContactTotals($receipt);
 
-        DB::transaction(function () use ($receipt, $totals) {
+        $bunq = $this->resolveBunqService();
+        $merchant = $receipt->store ?: 'Tally receipt';
+
+        $createdIds = DB::transaction(function () use ($receipt, $totals, $bunq, $merchant) {
             PaymentRequest::where('receipt_id', $receipt->id)->delete();
 
+            $ids = [];
             foreach ($totals as $contactId => $amount) {
                 if ($amount <= 0) {
                     continue;
                 }
 
-                PaymentRequest::create([
+                $rounded = round($amount, 2);
+                $contact = Contact::find($contactId);
+                $description = $this->buildBunqDescription($merchant, $contact, $rounded);
+
+                $bunqTabId = null;
+                $paymentUrl = null;
+
+                if ($bunq) {
+                    try {
+                        $link = $bunq->createPaymentLink((float) $rounded, $description);
+                        $bunqTabId = $link['tab_id'] ?? null;
+                        $paymentUrl = $link['url'] ?? null;
+                    } catch (Throwable $e) {
+                        Log::warning('bunq payment link creation failed for contact '.$contactId.': '.$e->getMessage());
+                    }
+                }
+
+                $pr = PaymentRequest::create([
                     'receipt_id' => $receipt->id,
                     'contact_id' => $contactId,
-                    'amount' => round($amount, 2),
+                    'amount' => $rounded,
                     'status' => 'pending',
+                    'bunq_tab_id' => $bunqTabId,
+                    'payment_url' => $paymentUrl,
                 ]);
+                $ids[] = $pr->id;
             }
+
+            return $ids;
         });
 
         $receipt->load('paymentRequests.contact');
@@ -97,6 +136,7 @@ class ReceiptController extends Controller
         return response()->json([
             'ok' => true,
             'receipt_id' => $receipt->id,
+            'bunq_available' => $bunq !== null,
             'splits' => $receipt->paymentRequests->map(fn (PaymentRequest $pr) => [
                 'id' => $pr->id,
                 'contact_id' => $pr->contact_id,
@@ -106,11 +146,37 @@ class ReceiptController extends Controller
                     'color' => $pr->contact->color,
                     'phone_number' => $pr->contact->phone_number,
                 ] : null,
-                'amount' => $pr->amount,
+                'amount' => (float) $pr->amount,
                 'status' => $pr->status,
                 'paid' => $pr->paid,
+                'bunq_tab_id' => $pr->bunq_tab_id,
+                'payment_url' => $pr->payment_url,
             ]),
         ]);
+    }
+
+    /**
+     * Resolve the BunqService if its context is initialised, otherwise null.
+     * Keeps the split flow working even when bunq:setup has not been run yet.
+     */
+    private function resolveBunqService(): ?BunqService
+    {
+        try {
+            return app(BunqService::class);
+        } catch (Throwable $e) {
+            Log::info('BunqService unavailable: '.$e->getMessage());
+            return null;
+        }
+    }
+
+    private function buildBunqDescription(string $merchant, ?Contact $contact, float $amount): string
+    {
+        $name = $contact?->name ?: 'friend';
+        $description = "Tally split - {$merchant} - {$name}";
+        if (mb_strlen($description) > 140) {
+            $description = mb_substr($description, 0, 140);
+        }
+        return $description;
     }
 
     public function status(Receipt $receipt): JsonResponse
@@ -186,6 +252,8 @@ class ReceiptController extends Controller
                 'amount' => (float) $pr->amount,
                 'status' => $pr->status,
                 'paid' => $pr->paid,
+                'bunq_tab_id' => $pr->bunq_tab_id,
+                'payment_url' => $pr->payment_url,
             ])->all();
         }
 

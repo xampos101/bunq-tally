@@ -11,7 +11,8 @@ class ContactController extends Controller
 {
     public function index(): JsonResponse
     {
-        $contacts = Contact::orderBy('name')
+        $contacts = Contact::query()
+            ->orderBy('name')
             ->get()
             ->map(fn (Contact $c) => $this->transform($c));
 
@@ -21,10 +22,10 @@ class ContactController extends Controller
     public function store(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'name' => 'required|string|max:120',
-            'color' => 'nullable|string|max:9',
-            'phone_number' => 'required|string|max:32|unique:contacts,phone_number',
-            'iban' => 'nullable|string|max:64',
+            'name'                 => 'required|string|max:120',
+            'color'                => 'nullable|string|max:9',
+            'phone_number'         => 'required|string|max:64|unique:contacts,phone_number',
+            'iban'                 => 'nullable|string|max:64',
             'whatsapp_profile_pic' => 'nullable|string|max:500',
         ]);
 
@@ -36,13 +37,13 @@ class ContactController extends Controller
     public function update(Request $request, Contact $contact): JsonResponse
     {
         $data = $request->validate([
-            'name' => 'sometimes|required|string|max:120',
-            'color' => 'sometimes|nullable|string|max:9',
-            'phone_number' => [
-                'sometimes', 'required', 'string', 'max:32',
+            'name'                 => 'sometimes|required|string|max:120',
+            'color'                => 'sometimes|nullable|string|max:9',
+            'phone_number'         => [
+                'sometimes', 'required', 'string', 'max:64',
                 Rule::unique('contacts', 'phone_number')->ignore($contact->id),
             ],
-            'iban' => 'sometimes|nullable|string|max:64',
+            'iban'                 => 'sometimes|nullable|string|max:64',
             'whatsapp_profile_pic' => 'sometimes|nullable|string|max:500',
         ]);
 
@@ -61,15 +62,16 @@ class ContactController extends Controller
     private function transform(Contact $c): array
     {
         return [
-            'id' => $c->id,
-            'name' => $c->name,
-            'color' => $c->color,
-            'initials' => $c->initials,
-            'phone_number' => $c->phone_number,
-            'iban' => $c->iban,
+            'id'                   => $c->id,
+            'name'                 => $c->name,
+            'color'                => $c->color,
+            'initials'             => $c->initials,
+            'phone_number'         => $c->phone_number,
+            'country_code'         => $c->country_code,
+            'iban'                 => $c->iban,
             'whatsapp_profile_pic' => $c->whatsapp_profile_pic,
-            'created_at' => $c->created_at,
-            'updated_at' => $c->updated_at,
+            'created_at'           => $c->created_at,
+            'updated_at'           => $c->updated_at,
         ];
     }
 }
