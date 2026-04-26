@@ -1,5 +1,4 @@
 # bunq Tally
-
 AI-powered receipt splitting. Scan receipts, assign items to contacts, generate bunq payment links, and notify via WhatsApp — all from one app.
 
 ## Features
