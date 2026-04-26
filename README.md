@@ -1,4 +1,5 @@
 # bunq Tally
+<img width="196" height="65" alt="BunqTally" src="https://github.com/user-attachments/assets/b01f9aaa-f9f7-41ca-9703-afd828e7afbe" />
 AI-powered receipt splitting. Scan receipts, assign items to contacts, generate bunq payment links, and notify via WhatsApp — all from one app.
 
 ## Features
